@@ -1,0 +1,13 @@
+/usr/local/quicserver/logs/*.log {
+        #daily
+        size 500M
+        missingok
+        rotate 40
+        #compress
+        delaycompress
+        notifempty
+        sharedscripts
+        postrotate
+                [ -f /usr/local/quicserver/var/quicserver.pid ] && kill -USR1 `cat /usr/local/quicserver/var/quicserver.pid`
+        endscript
+}

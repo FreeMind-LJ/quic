@@ -1,0 +1,150 @@
+%define software quicserver
+%define quicserver_user nobody
+%define quicserver_group nobody
+%define quicserver_home /usr/local/quicserver
+%define quicserver_home_tmp /usr/local/quicserver/tmp
+
+Name: %{software}
+Version: @version@
+Release: @release@%{?dist}
+Vendor: Baishancloud
+Packager: Lujb 
+URL: http://baishancloud.com
+Summary: quic server
+License: 2-clause BSD-like license
+Group: System Environment/Daemons
+
+Source0: quicserver-%{version}.tar.gz
+
+BuildRoot: %{_tmppath}/%{software}-%{version}-%{release}-root
+BuildRequires: pcre-devel
+BuildRequires: perl
+Requires: initscripts >= 8.36
+Requires(pre): shadow-utils
+Requires(post): chkconfig
+Provides: server
+
+%description
+nginx server that supports quic protocol.
+
+%prep
+%setup -q -n %{software}-%{version}
+
+%build
+./auto/configure \
+    --prefix=%{quicserver_home} \
+    --conf-path=%{quicserver_home}/conf/quicserver.conf \
+    --sbin-path=%{quicserver_home}/sbin/quicserver \
+    --error-log-path=%{quicserver_home}/logs/error.log \
+    --http-log-path=%{quicserver_home}/logs/access.log \
+    --pid-path=%{quicserver_home}/var/quicserver.pid \
+    --lock-path=%{quicserver_home}/var/quicserver.lock \
+    --user=%{quicserver_user} \
+    --group=%{quicserver_group} \
+    --http-fastcgi-temp-path=%{quicserver_home}/fastcgi \
+    --http-uwsgi-temp-path=%{quicserver_home_tmp}/uwsgi \
+    --http-scgi-temp-path=%{quicserver_home_tmp}/scgi \
+    --with-debug \
+    --with-http_v3_module \
+    --with-stream \
+    --with-http_quic_module \
+    --with-http_ssl_module \
+    --with-stream_quic_module \
+    --add-module=./modules/nginx-rtmp-module \
+    --with-cc-opt="-I/home/lujb/nginx-quic/boringssl/include" \
+    --with-ld-opt="-L/home/lujb/nginx-quic/boringssl/build/ssl -L/home/lujb/nginx-quic/boringssl/build/crypto" \
+        $*
+make %{?_smp_mflags}
+
+
+%install
+# remove default stripping
+%define __spec_install_port /usr/lib/rpm/brp-compress
+
+%{__rm} -rf $RPM_BUILD_ROOT
+%{__make} DESTDIR=$RPM_BUILD_ROOT install
+
+%{__mkdir} -p $RPM_BUILD_ROOT%{quicserver_home}/var
+%{__mkdir} -p $RPM_BUILD_ROOT%{quicserver_home}/logs
+%{__mkdir} -p $RPM_BUILD_ROOT%{quicserver_home_tmp}
+%{__mkdir} -p $RPM_BUILD_ROOT%{_initrddir}
+%{__mkdir} -p $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d
+
+install -m 755 quicserver.init $RPM_BUILD_ROOT%{_initrddir}/quicserver
+install -m 644 logrotate.quicserver $RPM_BUILD_ROOT%{_sysconfdir}/logrotate.d/quicserver
+
+%{__rm} -rf $RPM_BUILD_ROOT%{quicserver_home}/include
+%{__rm} -f $RPM_BUILD_ROOT%{quicserver_home}/conf/*.default
+%{__rm} -f $RPM_BUILD_ROOT%{quicserver_home}/conf/fastcgi.conf
+%{__rm} -f $RPM_BUILD_ROOT%{quicserver_home}/conf/scgi_params
+%{__rm} -f $RPM_BUILD_ROOT%{quicserver_home}/conf/uwsgi_params
+
+# install SYSV init stuff
+
+%clean
+#%{__rm} -rf $RPM_BUILD_ROOT
+
+%files
+%defattr(-,root,root)
+
+%{quicserver_home}/sbin/quicserver
+
+%dir %{quicserver_home}/conf
+%attr(0755,root,root) %dir %{quicserver_home}/var
+%attr(0755,root,root) %dir %{quicserver_home}/logs
+%attr(-,%{quicserver_user},%{quicserver_group}) %dir %{quicserver_home_tmp}
+
+%config(noreplace) %{quicserver_home}/conf/quicserver.conf
+%config(noreplace) %{quicserver_home}/conf/mime.types
+%config(noreplace) %{quicserver_home}/conf/fastcgi_params
+%config(noreplace) %{quicserver_home}/conf/koi-utf
+%config(noreplace) %{quicserver_home}/conf/koi-win
+%config(noreplace) %{quicserver_home}/conf/win-utf
+
+
+%{quicserver_home}/html
+
+%{_initrddir}/quicserver
+%config(noreplace) %{_sysconfdir}/logrotate.d/quicserver
+
+%pre
+# if [ $1 -gt 1 ]; then
+#    forbid to upgrade rpm package
+#    echo "Upgrading quicserver RPM package is forbidden"
+#    exit 1
+# fi
+
+# Add the "web" user
+getent group %{quicserver_group} >/dev/null || groupadd -r %{quicserver_group}
+getent passwd %{quicserver_user} >/dev/null || \
+    useradd -r -g %{quicserver_group} -s /sbin/nologin \
+    -d %{quicserver_home} -c "web user"  %{quicserver_user}
+exit 0
+
+%post
+# Register the quicserver service
+if [ $1 -eq 1 ]; then
+   /sbin/chkconfig --add quicserver
+fi
+
+test -f /var/spool/cron/root && sed -r '/\/etc\/logrotate.d\/quicserver/d' -i /var/spool/cron/root
+echo "13,43 * * * * /usr/sbin/logrotate /etc/logrotate.d/quicserver &>/dev/null" >> /var/spool/cron/root
+service crond reload &>/dev/null
+
+%preun
+if [ $1 -eq 0 ]; then
+   /sbin/service quicserver stop > /dev/null 2>&1
+   /sbin/chkconfig --del quicserver
+fi
+
+%postun
+if [ $1 -ge 1 ]; then
+    /sbin/service quicserver upgrade &>/dev/null || :
+fi
+
+if [ "$1" -eq "0" ]
+then
+    test -f /var/spool/cron/root && sed -r '/\/etc\/logrotate.d\/quicserver/d' -i /var/spool/cron/root
+    service crond reload &>/dev/null
+fi
+

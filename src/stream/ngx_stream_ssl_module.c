@@ -13,10 +13,21 @@
 typedef ngx_int_t (*ngx_ssl_variable_handler_pt)(ngx_connection_t *c,
     ngx_pool_t *pool, ngx_str_t *s);
 
-
 #define NGX_DEFAULT_CIPHERS     "HIGH:!aNULL:!MD5"
 #define NGX_DEFAULT_ECDH_CURVE  "auto"
 
+#define NGX_QUIC_NPN_ADVERTISE  "\x05hq-29\x09wq-vvv-01"
+
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
+static int ngx_stream_ssl_alpn_select(ngx_ssl_conn_t *ssl_conn,
+    const unsigned char **out, unsigned char *outlen,
+    const unsigned char *in, unsigned int inlen, void *arg);
+#endif
+
+#ifdef TLSEXT_TYPE_next_proto_neg
+static int ngx_stream_ssl_npn_advertised(ngx_ssl_conn_t *ssl_conn,
+    const unsigned char **out, unsigned int *outlen, void *arg);
+#endif
 
 static ngx_int_t ngx_stream_ssl_handler(ngx_stream_session_t *s);
 static ngx_int_t ngx_stream_ssl_init_connection(ngx_ssl_t *ssl,
@@ -306,6 +317,68 @@ static ngx_stream_variable_t  ngx_stream_ssl_vars[] = {
 
 
 static ngx_str_t ngx_stream_ssl_sess_id_ctx = ngx_string("STREAM");
+
+
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
+
+static int
+ngx_stream_ssl_alpn_select(ngx_ssl_conn_t *ssl_conn, const unsigned char **out,
+    unsigned char *outlen, const unsigned char *in, unsigned int inlen,
+    void *arg)
+{
+    unsigned int            srvlen;
+    unsigned char          *srv;
+#if (NGX_DEBUG)
+    unsigned int            i;
+#endif
+#if (NGX_STREAM_QUIC || NGX_DEBUG)
+    ngx_connection_t       *c;
+
+    c = ngx_ssl_get_connection(ssl_conn);
+#endif
+
+#if (NGX_DEBUG)
+    for (i = 0; i < inlen; i += in[i] + 1) {
+        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                       "SSL ALPN supported by client: %*s",
+                       (size_t) in[i], &in[i + 1]);
+    }
+#endif
+
+    {
+        srv = (unsigned char *) NGX_QUIC_NPN_ADVERTISE;
+        srvlen = sizeof(NGX_QUIC_NPN_ADVERTISE) - 1;
+    }
+
+    if (SSL_select_next_proto((unsigned char **) out, outlen, srv, srvlen,
+                              in, inlen)
+        != OPENSSL_NPN_NEGOTIATED)
+    {
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+
+    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, c->log, 0,
+                   "SSL ALPN selected: %*s", (size_t) *outlen, *out);
+
+    return SSL_TLSEXT_ERR_OK;
+}
+
+#endif
+
+
+#ifdef TLSEXT_TYPE_next_proto_neg
+
+static int
+ngx_stream_ssl_npn_advertised(ngx_ssl_conn_t *ssl_conn,
+    const unsigned char **out, unsigned int *outlen, void *arg)
+{
+    *out = (unsigned char *) NGX_QUIC_NPN_ADVERTISE;
+    *outlen = sizeof(NGX_QUIC_NPN_ADVERTISE) - 1;
+
+    return SSL_TLSEXT_ERR_OK;
+}
+
+#endif
 
 
 static ngx_int_t
@@ -718,6 +791,15 @@ ngx_stream_ssl_merge_conf(ngx_conf_t *cf, void *parent, void *child)
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
     SSL_CTX_set_tlsext_servername_callback(conf->ssl.ctx,
                                            ngx_stream_ssl_servername);
+#endif
+
+#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
+    SSL_CTX_set_alpn_select_cb(conf->ssl.ctx, ngx_stream_ssl_alpn_select, NULL);
+#endif
+
+#ifdef TLSEXT_TYPE_next_proto_neg
+    SSL_CTX_set_next_protos_advertised_cb(conf->ssl.ctx,
+                                          ngx_stream_ssl_npn_advertised, NULL);
 #endif
 
     if (ngx_stream_ssl_compile_certificates(cf, conf) != NGX_OK) {
